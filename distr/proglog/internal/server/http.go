@@ -1,76 +1,116 @@
 package server
 
 import (
-	"fmt"
+	"encoding/json"
 	"net/http"
 	"path"
 )
 
-// server that contains log of Records
 type httpServer struct {
-	Logs *Log
+	Log *Log
 }
 
-// map of client requests to a handler function
+func newHTTPServer() *httpServer {
+	return &httpServer{
+		Log: NewLog(),
+	}
+}
+
+func (s *httpServer) produceHandler(res http.ResponseWriter, req *http.Request) {
+	var request ProduceRequest
+	err := json.NewDecoder(req.Body).Decode(&request)
+	if err != nil {
+		http.Error(res, err.Error(), http.StatusBadRequest)
+		return
+	}
+	offset := s.Log.Append(request.Record)
+	response := ProduceResponse{
+		Offset: offset,
+	}
+	err = json.NewEncoder(res).Encode(&response)
+	if err != nil {
+		http.Error(res, err.Error(), http.StatusInternalServerError)
+		return
+	}
+}
+
+func (s *httpServer) consumeHandler(res http.ResponseWriter, req *http.Request) {
+	var request ConsumeRequest
+	err := json.NewDecoder(req.Body).Decode(&request)
+	if err != nil {
+		http.Error(res, err.Error(), http.StatusBadRequest)
+		return
+	}
+	record, err := s.Log.Read(request.Offset)
+	if err == ErrOutOfBounds {
+		http.Error(res, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err != nil {
+		http.Error(res, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	response := ConsumeResponse{
+		Record: record,
+	}
+	err = json.NewEncoder(res).Encode(&response)
+	if err != nil {
+		http.Error(res, err.Error(), http.StatusInternalServerError)
+		return
+	}
+}
+
+// structs required to unmarshal json requests into
+// request -> server
+// server -> response
+type ProduceRequest struct {
+	Record Record `json:"record"` // append this record into the log
+}
+
+type ProduceResponse struct {
+	Offset uint64 `json:"offset"` // the response to caller that appended record
+}
+
+type ConsumeRequest struct {
+	Offset uint64 `json:"offset"` // request to read record at offset
+}
+
+type ConsumeResponse struct {
+	Record Record `json:"record"` // record to read
+}
+
 type pathResolver struct {
 	handlers map[string]http.HandlerFunc
 }
 
 func newPathResolver() *pathResolver {
-	return &pathResolver{make(map[string]http.HandlerFunc)}
+	return &pathResolver{
+		handlers: make(map[string]http.HandlerFunc),
+	}
 }
 
-// adds a handler to a path
-func (p *pathResolver) Add(path string, handler http.HandlerFunc) {
-	p.handlers[path] = handler
-}
-
-// iterates over handlers map, and calls the handler function associated with the path, if path and
-// request method match
 func (p *pathResolver) ServeHTTP(res http.ResponseWriter, req *http.Request) {
-	// method and path to check
 	check := req.Method + " " + req.URL.Path
-
-	// iterate across handlers and execute handler function
-	for pattern, handlerFunc := range p.handlers {
-		if ok, err := path.Match(pattern, check); ok && err != path.ErrBadPattern {
-			handlerFunc(res, req)
+	for reqPath, handler := range p.handlers {
+		if matched, err := path.Match(check, reqPath); matched && err == nil {
+			handler(res, req)
 			return
-		} else if err == path.ErrBadPattern {
-			fmt.Fprint(res, err)
 		}
 	}
-
 	http.NotFound(res, req)
 }
 
-func newHTTPServer() *httpServer {
-	return &httpServer{
-		Logs: NewLog(),
-	}
+func (p *pathResolver) AddPath(path string, handler http.HandlerFunc) {
+	p.handlers[path] = handler
 }
 
-// returns a server that handles set paths
 func NewHTTPServer(addr string) *http.Server {
-	s := newHTTPServer()
-	p := newPathResolver()
-
-	// add method and path
-	p.Add("GET /", s.consumeHandle)
-	p.Add("POST /", s.produceHandle)
-
+	server := newHTTPServer()
+	paths := newPathResolver()
+	paths.AddPath("GET /", server.consumeHandler)
+	paths.AddPath("POST /", server.produceHandler)
 	return &http.Server{
 		Addr:    addr,
-		Handler: p,
+		Handler: paths,
 	}
-}
-
-// TODO
-func (s *httpServer) consumeHandle(res http.ResponseWriter, req *http.Request) {
-
-}
-
-// TODO
-func (s *httpServer) produceHandle(res http.ResponseWriter, req *http.Request) {
-
 }
